@@ -633,6 +633,48 @@ async function main() {
   assert(slotHtml().includes(rowHtml(BIG_B, 1, 20, 0, 20, "第 1 名")), "并列：后者第 1 名");
   server.raw = null;
 
+  console.log("大整数秒数：原总用时与罚秒按十进制精确相加、精确排序，不被浮点舍入");
+  // 两个原总用时都超过 2^53，相差仅 1：Number 无法区分，罚秒相加也会被舍入；
+  // 名次表必须按十进制字符串精确处理总用时与差值。
+  const TT_A = "9007199254740992"; // 2^53
+  const TT_B = "9007199254740993"; // 2^53 + 1
+  fire($("clear-btn"), "click");
+  setVal("smMin", "10"); setVal("smMax", "60"); setVal("mfMin", "10"); setVal("mfMax", "60");
+  numInputs()[0].value = "101";
+  fire(addRunner, "click");
+  numInputs()[1].value = "102";
+  fire(runnerRows, "input");
+  for (let i = 0; i < 5; i++) fire(addRecord, "click"); // 共 6 行记录
+  setRow("h1", "101", "S", "0"); setRow("h2", "101", "M", "10"); setRow("h3", "101", "F", "20");
+  setRow("k1", "102", "S", "0"); setRow("k2", "102", "M", "10"); setRow("k3", "102", "F", "20");
+  const bigTimeRunner = (num, total) =>
+    `{"runner":${num},"lapCount":1,"totalTime":${total},"laps":[` +
+    `{"start":{"id":"x","time":0},"middle":{"id":"y","time":10},"finish":{"id":"z","time":20},` +
+    `"smTime":10,"mfTime":10,"totalTime":20}],"unused":[]}`;
+  server.raw = `{"ok":true,"result":{"runners":[` +
+    `${bigTimeRunner(101, TT_A)},${bigTimeRunner(102, TT_B)}]}}`;
+  await adjudicate();
+  assert(results.innerHTML.includes(`各趟用时之和：${TT_A} 秒`), "选手卡精确显示 2^53 秒总用时");
+  assert(slotHtml().includes(`<td>${TT_A} 秒</td>`), "名次表精确显示 2^53 秒原总用时");
+  assert(slotHtml().includes(`<td>${TT_B} 秒</td>`), "名次表精确显示 2^53+1 秒原总用时（不显示成相同值）");
+  assert(slotHtml().includes(rowHtml(101, 1, TT_A, 0, TT_A, "第 1 名")), "101（2^53）第 1 名");
+  assert(slotHtml().includes(rowHtml(102, 1, TT_B, 0, TT_B, "第 2 名")), "102（2^53+1）第 2 名（相差 1 也要区分）");
+  // 给 101 保存 1 秒：2^53 + 1 与 102 的 2^53+1 精确相等 → 并列第 1。
+  savePenalty(101, "1", "大秒数罚秒");
+  assert(
+    slotHtml().includes(rowHtml(101, 1, TT_A, 1, TT_B, "第 1 名")),
+    "调整后用时按十进制精确相加：2^53 + 1 秒不被舍入"
+  );
+  assert(slotHtml().includes(rowHtml(102, 1, TT_B, 0, TT_B, "第 1 名")), "102 并列第 1 名");
+  // 再给 102 保存 1 秒：它变为 2^53+2，严格排到后面。
+  savePenalty(102, "1", "大秒数罚秒二");
+  assert(slotHtml().includes(rowHtml(101, 1, TT_A, 1, TT_B, "第 1 名")), "101 仍第 1 名");
+  assert(
+    slotHtml().includes(rowHtml(102, 1, TT_B, 1, "9007199254740994", "第 2 名")),
+    "102 调整后为 2^53+2 秒，精确排第 2（不被浮点舍入并列）"
+  );
+  server.raw = null;
+
   console.log(failures === 0 ? "\nALL RANKING SCENARIOS PASSED" : `\n${failures} ASSERTION(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

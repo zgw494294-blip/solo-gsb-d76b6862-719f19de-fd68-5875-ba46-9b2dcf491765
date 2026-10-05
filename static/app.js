@@ -26,6 +26,64 @@ function parseRunnerNumber(value) {
   return /^\d+$/.test(value) ? value.replace(/^0+(?=\d)/, "") : null;
 }
 
+// 记录秒数同理：后端接受任意大的非负整数秒（如 2^53 附近），JS Number 会把
+// 9007199254741003 舍入成 9007199254741004，使相邻记录的秒数差由 11 变成 12，
+// 进而误判复核绑定失效、页面也显示成错误秒数。因此所有秒数（记录秒数、两段
+// 耗时、总用时、区间）在页面内一律保持规范十进制字符串，不经过 Number 缩小范围。
+function canonicalUintText(value) {
+  if (typeof value === "number") {
+    // 仅处理无损解析器已确认的安全整数；其余一律视为非法文本。
+    if (!Number.isSafeInteger(value) || value < 0) return null;
+    value = String(value);
+  }
+  if (typeof value !== "string") return null;
+  const t = value.trim();
+  if (!/^\d+$/.test(t)) return null;
+  return t.replace(/^0+(?=\d)/, "");
+}
+
+// 两个规范十进制非负整数字符串的数值比较：-1 / 0 / 1，任意大都精确。
+function decCmp(a, b) {
+  if (a.length !== b.length) return a.length < b.length ? -1 : 1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+// 规范十进制非负整数加法：a + b，结果仍是规范十进制字符串。
+function decAdd(a, b) {
+  let i = a.length - 1;
+  let j = b.length - 1;
+  let carry = 0;
+  let out = "";
+  while (i >= 0 || j >= 0 || carry) {
+    const da = i >= 0 ? Number(a[i]) : 0;
+    const db = j >= 0 ? Number(b[j]) : 0;
+    const sum = da + db + carry;
+    out = String(sum % 10) + out;
+    carry = sum >= 10 ? 1 : 0;
+    i -= 1;
+    j -= 1;
+  }
+  return out;
+}
+
+// 规范十进制非负整数减法：a - b（要求 a >= b），结果仍是规范十进制字符串。
+function decSub(a, b) {
+  let i = a.length - 1;
+  let j = b.length - 1;
+  let borrow = 0;
+  let out = "";
+  while (i >= 0) {
+    const da = Number(a[i]) - borrow;
+    const db = j >= 0 ? Number(b[j]) : 0;
+    const diff = da - db;
+    out = String((diff + 10) % 10) + out;
+    borrow = diff < 0 ? 1 : 0;
+    i -= 1;
+    j -= 1;
+  }
+  return out.replace(/^0+(?=\d)/, "");
+}
+
 function releaseRunnerPenalty(number) {
   if (number !== null) penalties.delete(number);
 }
@@ -331,24 +389,26 @@ function parseJsonLossless(text) {
   return value;
 }
 
-// 裁决结果规范化：选手编号统一为规范十进制字符串（任意大都无损）；
-// 编号之外的数值字段还原为 Number（与直接 JSON.parse 的历史行为一致）。
+// 裁决结果规范化：
+// - 选手编号与所有秒数（记录秒数、两段耗时、总用时）统一为规范十进制字符串：
+//   无损解析器对超过 2^53 的整数字面量返回字符串，安全整数返回 Number，
+//   这里全部归一为字符串，任意大的秒数都不被浮点舍入；
+// - 计次数等小整数仍还原为 Number（与直接 JSON.parse 的历史行为一致）。
 function normalizeResult(result) {
-  const asNumber = (v) => (typeof v === "string" ? Number(v) : v);
   for (const r of result.runners) {
     r.runner = typeof r.runner === "string" ? r.runner : String(r.runner);
-    r.lapCount = asNumber(r.lapCount);
-    r.totalTime = asNumber(r.totalTime);
+    r.lapCount = typeof r.lapCount === "number" ? r.lapCount : Number(r.lapCount);
+    r.totalTime = canonicalUintText(r.totalTime);
     for (const lap of r.laps) {
-      lap.start.time = asNumber(lap.start.time);
-      lap.middle.time = asNumber(lap.middle.time);
-      lap.finish.time = asNumber(lap.finish.time);
-      lap.smTime = asNumber(lap.smTime);
-      lap.mfTime = asNumber(lap.mfTime);
-      lap.totalTime = asNumber(lap.totalTime);
+      lap.start.time = canonicalUintText(lap.start.time);
+      lap.middle.time = canonicalUintText(lap.middle.time);
+      lap.finish.time = canonicalUintText(lap.finish.time);
+      lap.smTime = canonicalUintText(lap.smTime);
+      lap.mfTime = canonicalUintText(lap.mfTime);
+      lap.totalTime = canonicalUintText(lap.totalTime);
     }
     for (const u of r.unused) {
-      u.time = asNumber(u.time);
+      u.time = canonicalUintText(u.time);
     }
   }
   return result;
@@ -413,9 +473,11 @@ const MAX_REVIEW_NOTE = 200;
 // 最近一次渲染的趟绑定键（与 DOM 中 data-key-index 一一对应），仅供保存时回查。
 let renderedLapKeys = [];
 
+// 当前两段区间一律以规范十进制字符串表示；非法（空/非数字）元素为 null。
+// 绑定键中保存的就是这个值：前导零等值写法不算改变，非法值无法与任何键匹配。
 function currentStandards() {
   return ["smMin", "smMax", "mfMin", "mfMax"].map((id) =>
-    Number(document.getElementById(id).value.trim())
+    canonicalUintText(document.getElementById(id).value.trim())
   );
 }
 
@@ -461,11 +523,11 @@ function pruneReviewsByBindings() {
     });
   }
 
-  const intText = (v) => (/^\d+$/.test(v) ? Number(v) : NaN);
+  // 秒数一律按规范十进制字符串比较：任意大的秒数都精确，不经过 Number 舍入。
   const recordMatches = (rec, gate, time) =>
     rec !== undefined &&
     rec.gate === gate &&
-    intText(rec.time) === time;
+    canonicalUintText(rec.time) === time;
 
   for (const key of [...reviews.keys()]) {
     let parts;
@@ -485,6 +547,20 @@ function pruneReviewsByBindings() {
       boundStandards,
     ] = parts;
 
+    // 键由本版本页面生成时：绑定秒数与区间均为规范十进制字符串（区间非法位为 null）。
+    // 任何其他结构（含旧版本残留的数字秒数键）一律视为失效，不进入十进制运算。
+    const isText = (v) => typeof v === "string" && /^\d+$/.test(v);
+    const wellFormed =
+      isText(sTime) && isText(mTime) && isText(fTime) &&
+      isText(smTime) && isText(mfTime) &&
+      Array.isArray(boundStandards) &&
+      boundStandards.length === 4 &&
+      boundStandards.every((v) => v === null || isText(v));
+    if (!wellFormed) {
+      reviews.delete(key);
+      continue;
+    }
+
     let valid =
       JSON.stringify(boundStandards) === JSON.stringify(standards) &&
       runnerNumbers.has(runner) &&
@@ -500,7 +576,8 @@ function pruneReviewsByBindings() {
 
     if (valid) {
       // 绑定记录的选手编号必须仍是该选手（按规范十进制精确比较，大编号不混同）；
-      // 门/秒数不变时两段耗时自然不变，这里仍显式核对一次，避免任何不一致的键残留。
+      // 门/秒数不变时两段耗时自然不变，这里仍按十进制精确显式核对一次
+      // （2^53 附近不能用 Number 做减法，否则 11 会被舍入成 12 而误判失效）。
       const sRec = recordsById.get(sId);
       const mRec = recordsById.get(mId);
       const fRec = recordsById.get(fId);
@@ -508,8 +585,8 @@ function pruneReviewsByBindings() {
         parseRunnerNumber(sRec.runner.trim()) === runner &&
         parseRunnerNumber(mRec.runner.trim()) === runner &&
         parseRunnerNumber(fRec.runner.trim()) === runner &&
-        mTime - sTime === smTime &&
-        fTime - mTime === mfTime;
+        decSub(mTime, sTime) === smTime &&
+        decSub(fTime, mTime) === mfTime;
     }
 
     if (!valid) reviews.delete(key);
@@ -625,9 +702,10 @@ function prunePenaltiesByRunners() {
 // 名次：有完整计次者按计次数降序、调整后用时（原总用时 + 罚秒）升序，
 // 同值共享名次并跳号（1、1、3），并列按编号升序展示；
 // 零次者排末尾、按编号升序且无名次。
-// 编号是规范十进制字符串：先比长度、再按字典序即数值升序，任意大都精确。
+// 编号与总用时都是规范十进制字符串：按数值（先比长度、再比字典序）精确比较，
+// 任意大的秒数都不经过浮点舍入。
 function cmpRunnerNumbers(a, b) {
-  return a.length - b.length || (a < b ? -1 : a > b ? 1 : 0);
+  return decCmp(a, b);
 }
 
 function computeRanking(runners) {
@@ -639,7 +717,7 @@ function computeRanking(runners) {
       lapCount: r.lapCount,
       totalTime: r.totalTime,
       penalty,
-      adjusted: r.totalTime + penalty,
+      adjusted: decAdd(r.totalTime, String(penalty)),
       rank: null,
     };
   });
@@ -648,7 +726,7 @@ function computeRanking(runners) {
     .sort(
       (a, b) =>
         b.lapCount - a.lapCount ||
-        a.adjusted - b.adjusted ||
+        decCmp(a.adjusted, b.adjusted) ||
         cmpRunnerNumbers(a.runner, b.runner)
     );
   ranked.forEach((row, i) => {

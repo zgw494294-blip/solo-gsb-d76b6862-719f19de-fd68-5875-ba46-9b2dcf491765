@@ -187,9 +187,10 @@ const twoLapResult = {
   ],
 };
 
-const server = { mode: "valid", result: validResult, hold: null, raw: null };
+const server = { mode: "valid", result: validResult, hold: null, raw: null, lastBody: null };
 global.fetch = async (_url, opts) => {
   JSON.parse(opts.body); // 前端始终发送合法 JSON
+  server.lastBody = opts.body; // 供断言：大秒数按十进制字符串原样发送，不经 Number 缩窄
   // raw：直接以原文返回，模拟后端精确输出的大整数编号（JSON 数字可超过 2^53）。
   const respond = (data, ok, status) => ({
     ok,
@@ -480,6 +481,71 @@ async function main() {
   fire(runnerRows, "input");
   await adjudicate();
   assert(!rendered().includes("大编号备注B"), "后者改号为前者：后者的复核立即失效");
+  server.raw = null;
+
+  console.log("场景12：2^53 附近的记录秒数——无关编辑不丢复核，秒数与差值全程精确");
+  // 复现：区间 10~60 / 10~60，选手 101，S/M/F 秒数依次为
+  // 9007199254740992 / 9007199254741003 / 9007199254741014，两段各 11 秒，
+  // 裁决恰为一趟。旧实现把 M 的秒数经 Number 舍入成 9007199254741004，
+  // 保存复核后任何无关编辑（如增加空记录行）都会因差值 11≠12 而误删复核。
+  fire($("clear-btn"), "click");
+  const T_S = "9007199254740992";
+  const T_M = "9007199254741003";
+  const T_F = "9007199254741014";
+  setVal("smMin", "10"); setVal("smMax", "60"); setVal("mfMin", "10"); setVal("mfMax", "60");
+  runnerRows.querySelector(".runner-number").value = "101";
+  fire(addRecord, "click"); fire(addRecord, "click"); // 清空后仅 1 行记录，补到 3 行
+  setRow("s1", "101", "S", T_S);
+  setRow("m1", "101", "M", T_M);
+  setRow("f1", "101", "F", T_F);
+  server.raw = `{"ok":true,"result":{"runners":[` +
+    `{"runner":101,"lapCount":1,"totalTime":22,"laps":[` +
+    `{"start":{"id":"s1","time":${T_S}},"middle":{"id":"m1","time":${T_M}},` +
+    `"finish":{"id":"f1","time":${T_F}},"smTime":11,"mfTime":11,"totalTime":22}],"unused":[]}]}}`;
+  await adjudicate();
+  assert(rendered().includes(T_S), "页面精确显示 S 秒数（不被浮点舍入）");
+  assert(rendered().includes(T_M), "页面精确显示 M 秒数 9007199254741003（旧实现显示成 …1004）");
+  assert(rendered().includes(T_F), "页面精确显示 F 秒数");
+  assert((rendered().match(/— 11 秒 →/g) || []).length === 2, "两段耗时均显示 11 秒");
+  const sentBody = JSON.parse(server.lastBody);
+  assert(
+    sentBody.records.some((rec) => rec.time === T_M),
+    "请求按十进制字符串原样发送大秒数，不缩小时间取值范围"
+  );
+  saveReview(0, "pass", "大秒数备注");
+  await adjudicate();
+  assert(rendered().includes("大秒数备注") && rendered().includes("当前：通过"), "复核已保存并渲染");
+
+  fire(addRecord, "click"); // 增加一条空记录行：与该趟完全无关
+  await adjudicate();
+  assert(rendered().includes("大秒数备注") && rendered().includes("当前：通过"),
+    "增加空记录行并重算后，复核与备注保留（回归本 bug）");
+
+  // 手动重算同样保留。
+  fire(form, "submit");
+  await flush();
+  assert(rendered().includes("大秒数备注"), "手动重新计算后复核保留");
+
+  // 重排绑定记录、增删无关记录：绑定未变，保留。
+  const s1Row = rowOf("s1");
+  recordRows.appendChild(s1Row);
+  fire(s1Row.querySelector(".rec-id"), "input");
+  fire(addRecord, "click");
+  setRow("u9", "101", "S", "99999999999999999999");
+  fire(findRow("u9").querySelector(".rec-id"), "input");
+  await adjudicate();
+  assert(rendered().includes("大秒数备注"), "重排绑定记录 + 新增无关大秒数记录后保留");
+  removeRow("u9");
+  await adjudicate();
+  assert(rendered().includes("大秒数备注"), "删除无关记录后保留");
+
+  // 绑定秒数改变（即使旧值 Number 舍入后与新值相同）：立即失效，改回不恢复。
+  rowOf("m1").querySelector(".rec-time").value = "9007199254741004";
+  fire(rowOf("m1").querySelector(".rec-time"), "input"); // 绑定秒数变了：立即丢弃
+  rowOf("m1").querySelector(".rec-time").value = T_M;
+  fire(rowOf("m1").querySelector(".rec-time"), "input"); // 改回不恢复
+  await adjudicate();
+  assert(fresh("大秒数备注"), "绑定秒数改变立即失效，改回后未复核、空备注");
   server.raw = null;
 
   console.log(failures === 0 ? "\nALL FRONTEND SCENARIOS PASSED" : `\n${failures} ASSERTION(S) FAILED`);
