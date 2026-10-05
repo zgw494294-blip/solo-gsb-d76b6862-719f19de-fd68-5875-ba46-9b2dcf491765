@@ -482,6 +482,80 @@ async function main() {
   assert(!rendered().includes("大编号备注B"), "后者改号为前者：后者的复核立即失效");
   server.raw = null;
 
+  console.log("场景12：超过 2^53 的记录秒数与 11 秒差值——展示精确、无关编辑保留复核");
+  // 复现：两段区间 10~60，S/M/F 秒数为 9007199254740992 / …1003 / …1014，
+  // 后端裁决两段各 11 秒（差值在 Number 精度下会被算成 12、10）。
+  fire($("clear-btn"), "click");
+  await flush();
+  setVal("smMin", "10"); setVal("smMax", "60"); setVal("mfMin", "10"); setVal("mfMax", "60");
+  runnerRows.querySelector(".runner-number").value = "101";
+  fire(runnerRows, "input");
+  fire(addRecord, "click"); fire(addRecord, "click"); // 清空后 1 行 → 共 3 行记录
+  const T_S = "9007199254740992";
+  const T_M = "9007199254741003";
+  const T_F = "9007199254741014";
+  setRow("h1", "101", "S", T_S);
+  setRow("h2", "101", "M", T_M);
+  setRow("h3", "101", "F", T_F);
+  let sentBody = null;
+  const prevFetch = global.fetch;
+  global.fetch = async (url, opts) => { sentBody = opts.body; return prevFetch(url, opts); };
+  server.raw = `{"ok":true,"result":{"runners":[` +
+    `{"runner":101,"lapCount":1,"totalTime":22,"laps":[` +
+    `{"start":{"id":"h1","time":${T_S}},"middle":{"id":"h2","time":${T_M}},"finish":{"id":"h3","time":${T_F}},` +
+    `"smTime":11,"mfTime":11,"totalTime":22}],"unused":[]}]}}`;
+  await adjudicate();
+  global.fetch = prevFetch;
+  assert(
+    rendered().includes(T_S) && rendered().includes(T_M) && rendered().includes(T_F),
+    "三条大秒数原样精确展示"
+  );
+  assert(!rendered().includes("9007199254741004"), "中间门秒数未被浮点截断成 9007199254741004");
+  assert(
+    rendered().includes("起点→中途门 <strong>11</strong> 秒") &&
+      rendered().includes("中途门→终点 <strong>11</strong> 秒"),
+    "两段耗时都精确显示为 11 秒（不是 12 / 10）"
+  );
+  const bodyParsed = JSON.parse(sentBody);
+  assert(
+    bodyParsed.records[0].time === T_S &&
+      bodyParsed.records[1].time === T_M &&
+      bodyParsed.records[2].time === T_F,
+    "请求中的秒数以十进制字符串原样发送，不截断、不缩小取值范围"
+  );
+
+  console.log("  12a：保存“通过”+备注后，添加空记录行并重算，复核保留");
+  saveReview(0, "pass", "大秒数备注H");
+  fire(addRecord, "click"); // 仅添加一条空记录行（报告中的复现操作）
+  await adjudicate();
+  assert(
+    rendered().includes("大秒数备注H") && rendered().includes("当前：通过"),
+    "添加空记录行并重算后复核仍在（旧实现此刻变回未复核、备注消失）"
+  );
+
+  console.log("  12b：重排绑定记录、增删无关记录、手动重算均保留");
+  const h1 = rowOf("h1");
+  recordRows.appendChild(h1); // 重排到末尾
+  fire(h1.querySelector(".rec-id"), "input");
+  fire(addRecord, "click");
+  setRow("zbig", "101", "S", "9007199254740000");
+  fire(findRow("zbig").querySelector(".rec-id"), "input");
+  await adjudicate();
+  assert(rendered().includes("大秒数备注H"), "重排+新增无关大秒数记录后保留");
+  removeRow("zbig");
+  fire(form, "submit"); // 手动重新计算
+  await flush();
+  assert(rendered().includes("大秒数备注H"), "删除无关记录并手动重算后保留");
+
+  console.log("  12c：绑定秒数改变立即失效；改回原值不恢复");
+  rowOf("h2").querySelector(".rec-time").value = "9007199254741004"; // 与原值相差 1
+  fire(rowOf("h2").querySelector(".rec-time"), "input"); // 此刻即丢弃
+  rowOf("h2").querySelector(".rec-time").value = T_M;
+  fire(rowOf("h2").querySelector(".rec-time"), "input"); // 改回不恢复
+  await adjudicate();
+  assert(fresh("大秒数备注H"), "绑定秒数变化即失效，改回 9007199254741003 也不恢复");
+  server.raw = null;
+
   console.log(failures === 0 ? "\nALL FRONTEND SCENARIOS PASSED" : `\n${failures} ASSERTION(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

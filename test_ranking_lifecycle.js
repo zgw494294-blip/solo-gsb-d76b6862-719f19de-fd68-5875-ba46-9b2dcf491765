@@ -633,6 +633,39 @@ async function main() {
   assert(slotHtml().includes(rowHtml(BIG_B, 1, 20, 0, 20, "第 1 名")), "并列：后者第 1 名");
   server.raw = null;
 
+  console.log("超过 2^53 的总用时：原总用时与调整后用时按十进制精确展示和排名");
+  // 两条趟的总用时相差 11 秒：Number 精度下会被截断成同值，名次与罚秒叠加都必须
+  // 仍按精确整数处理（与复核绑定共用同一套秒数字符串，不经过 Number）。
+  const T1 = "9007199254740992"; // 2^53
+  const T2 = "9007199254741003"; // +11
+  const bigTimeRunner = (num, total) =>
+    `{"runner":${num},"lapCount":1,"totalTime":${total},"laps":[` +
+    `{"start":{"id":"x${num}a","time":0},"middle":{"id":"x${num}b","time":11},` +
+    `"finish":{"id":"x${num}c","time":${total}},"smTime":11,"mfTime":${BigInt(total) - 11n},"totalTime":${total}}],"unused":[]}`;
+  setVal("smMin", "10"); setVal("smMax", "60"); setVal("mfMin", "10"); setVal("mfMax", "60");
+  fire($("clear-btn"), "click");
+  await flush();
+  fire(addRunner, "click"); // 共 2 行选手
+  numInputs()[0].value = "201"; numInputs()[1].value = "202";
+  fire(runnerRows, "input");
+  for (let i = 0; i < 5; i++) fire(addRecord, "click"); // 清空后 1 行 → 共 6 行记录
+  setRow("x201a", "201", "S", "0"); setRow("x201b", "201", "M", "11"); setRow("x201c", "201", "F", T1);
+  setRow("x202a", "202", "S", "0"); setRow("x202b", "202", "M", "11"); setRow("x202c", "202", "F", T2);
+  server.raw = `{"ok":true,"result":{"runners":[` +
+    `${bigTimeRunner(201, T1)},${bigTimeRunner(202, T2)}]}}`;
+  await adjudicate();
+  assert(slotHtml().includes(`<td>${T1} 秒</td>`) && slotHtml().includes(`<td>${T2} 秒</td>`),
+    "原总用时大整数原样展示，不截断");
+  assert(slotHtml().includes(rowHtml(201, 1, T1, 0, T1, "第 1 名")), "总用时小者（相差 11 秒）排第 1");
+  assert(slotHtml().includes(rowHtml(202, 1, T2, 0, T2, "第 2 名")), "总用时长者排第 2，不被浮点误判并列");
+  // 给领先者加 11 秒罚秒：调整后用时精确相等（T1+11 == T2），应并列第 1 并跳号。
+  r = savePenalty(201, "11", "大秒数罚秒");
+  assert(r.error.hidden, "大秒数场景下罚秒保存成功");
+  assert(slotHtml().includes(rowHtml(201, 1, T1, 11, T2, "第 1 名")), "201 加 11 秒后与 202 精确并列第 1");
+  assert(slotHtml().includes(rowHtml(202, 1, T2, 0, T2, "第 1 名")), "202 并列第 1");
+  assert(!slotHtml().includes("第 2 名"), "大整数并列同样跳号：不存在第 2 名");
+  server.raw = null;
+
   console.log(failures === 0 ? "\nALL RANKING SCENARIOS PASSED" : `\n${failures} ASSERTION(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }
